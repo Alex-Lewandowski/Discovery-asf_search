@@ -7,18 +7,28 @@ import pandas as pd
 from shapely.geometry import shape
 
 
-### TODOs:
-# - support add/remove pairs
-# - optionally connect both beginning and end of each season with 1-year pairs (currently connects ends only)
-# - optional arg for target date from which to create bridge pairs
-# - optional automatic disconnected-stack correction 
-#     - If there is an interruption in data at the end of a season, a disconnection can occur
-#         - work backwards from the end of the season until a scene is found that can connect to the following year
-#     - if the final season in a stack contains no scene within the temporal baseline threshold of the end of the season, it will be disconnected
-#         - solution: perform backwards search to connect end of stack to previous year (maintain earlier date as ref scene)
-
 class ASFSBASStack:
-    def __init__(self, **kwargs):
+    """
+    The ASFSBASStack class creates connected SBAS stacks from Sentinel-1 SLCs and Sentinel-1 SLC bursts. All pairs are created based on the currently set temporal and perpendicular baselines. If a season is defined, out-of-season acquisitions are filtered and seasonal gaps are bridged with 1-year pairs. To determine the number of seasonal bridge pairs to create, a quantity is estimated by dividing the temporal baseline by an expected repeat pass frequency for the satellite (12 days for Sentinel-1). If a reference scene is expected to have 3 pairs, and one is available in-season, only 2 out-of-season pairs will be created. 
+
+    Stacks are not guaranteed to be connected. A lack of data acquired at a given time and place can cause gaps.
+
+    Key methods:
+        - `plot()`
+        - `get_insar_pairs()`
+
+    TODOs:
+      - support add/remove pairs
+      - optionally connect both beginning and end of each season with 1-year pairs (currently connects ends only)
+      - optional arg for target date from which to create bridge pairs
+      - optional automatic disconnected-stack correction 
+        - If there is an interruption in data at the end of a season, a disconnection can occur
+          - work backwards from the end of the season until a scene is found that can connect to the following year
+        - if the final season in a stack contains no scene within the temporal baseline threshold of the end of the season, it will be disconnected
+          - solution: perform backwards search to connect end of stack to previous year (maintain earlier date as ref scene)
+    """
+                
+    def __init__(self, **kwargs: dict):
         self.plot_available = False
         try:
             import plotly.graph_objects as go
@@ -28,7 +38,7 @@ class ASFSBASStack:
             print('Warning: ASFSBASStack.plot() requires additional dependencies: plotly and/or networkx')
         
         self._ref_scene_id = kwargs.get('refSceneName', None)  
-        self._season = kwargs.get('season', None)
+        self._season = kwargs.get('season', ('1-1', '12-31'))
         self._start = kwargs.get('start', None)
         self._end = kwargs.get('end', None)
         self._needs_ref_stack_update = True
@@ -39,7 +49,7 @@ class ASFSBASStack:
         self.repeat_pass_freq = kwargs.get('repeatPassFrequency', 12)
 
         # build stack upon initialization if required args were passed
-        if self._ref_scene_id and self._season and self._end:
+        if self._ref_scene_id and self._end:
             self._sbas_stack = self.build_sbas_stack()
             self._needs_ref_stack_update = False
 
@@ -114,7 +124,7 @@ class ASFSBASStack:
         return self._plot
             
     
-    def get_ref_stacks(self, stack_gdf, season_bounds):
+    def get_ref_stacks(self, stack_gdf: gpd.GeoDataFrame, season_bounds: tuple[int,int]):
         if self._sbas_stack is not None: 
             # merge updated stack_gdf with existing _sbas_stack so we only need to make API calls on added scenes 
             stack_gdf = self._sbas_stack.merge(stack_gdf, on=['sceneName'], how='right')
