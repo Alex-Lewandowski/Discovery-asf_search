@@ -9,7 +9,7 @@ from shapely.geometry import shape
 
 ### TODOs:
 # - support add/remove pairs
-# - optionally connect start and ends of each season with 1-year pairs
+# - optionally connect both beginning and end of each season with 1-year pairs (currently connects ends only)
 # - optional arg for target date from which to create bridge pairs
 # - optional automatic disconnected-stack correction 
 #     - If there is an interruption in data at the end of a season, a disconnection can occur
@@ -216,6 +216,8 @@ class ASFSBASStack:
         ]
 
     def _plot(self):
+        import plotly.graph_objects as go
+        import networkx as nx
         G = nx.Graph()
 
         insar_node_pairs = [
