@@ -1,12 +1,11 @@
-from datetime import datetime
-from shapely.geometry import shape
+from datetime import datetime, timedelta
+
 import asf_search as asf
-import pandas as pd
 import geopandas as gpd
 import numpy as np
-import plotly.graph_objects as go
-import networkx as nx
-from datetime import datetime, timedelta
+import pandas as pd
+from shapely.geometry import shape
+
 
 ### TODOs:
 # - support add/remove pairs
@@ -20,6 +19,14 @@ from datetime import datetime, timedelta
 
 class ASFSBASStack:
     def __init__(self, **kwargs):
+        self.plot_available = False
+        try:
+            import plotly.graph_objects as go
+            import networkx as nx
+            self.plot_available = True
+        except ImportError:
+            print('Warning: ASFSBASStack.plot() requires additional dependencies: plotly and/or networkx')
+        
         self._ref_scene_id = kwargs.get('refSceneName', None)  
         self._season = kwargs.get('season', None)
         self._start = kwargs.get('start', None)
@@ -99,8 +106,14 @@ class ASFSBASStack:
             axis=1
         )
         return self._sbas_stack
-        
 
+    @property
+    def plot(self):
+        if not self.plot_available:
+            raise Exception('ASFSBASStack.plot() requires additional dependencies: plotly and/or networkx')
+        return self._plot
+            
+    
     def get_ref_stacks(self, stack_gdf, season_bounds):
         if self._sbas_stack is not None: 
             # merge updated stack_gdf with existing _sbas_stack so we only need to make API calls on added scenes 
@@ -202,7 +215,7 @@ class ASFSBASStack:
             for neighbor in row['insarNeighbors']
         ]
 
-    def plot(self):
+    def _plot(self):
         G = nx.Graph()
 
         insar_node_pairs = [
