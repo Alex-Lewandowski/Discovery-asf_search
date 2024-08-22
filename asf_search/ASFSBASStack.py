@@ -7,9 +7,29 @@ import pandas as pd
 from shapely.geometry import shape
 
 
+"""
+    TODOs:
+      - stack length getter
+      - support add/remove pairs
+      - add optional overlap threshold
+      - optionally connect both beginning and end of each season with 1-year pairs (currently connects ends only)
+      - optional arg for target date from which to create bridge pairs
+      - optional automatic disconnected-stack correction 
+        - If there is an interruption in data at the end of a season, a disconnection can occur
+          - work backwards from the end of the season until a scene is found that can connect to the following year
+        - if the final season in a stack contains no scene within the temporal baseline threshold of the end of the season, it 
+          will be disconnected
+          - solution: perform backwards search to connect end of stack to previous year (maintain earlier date as ref scene)
+"""
+
+
 class ASFSBASStack:
     """
-    The ASFSBASStack class creates connected SBAS stacks from Sentinel-1 SLCs and Sentinel-1 SLC bursts. All pairs are created based on the currently set temporal and perpendicular baselines. If a season is defined, out-of-season acquisitions are filtered and seasonal gaps are bridged with 1-year pairs. To determine the number of seasonal bridge pairs to create, a quantity is estimated by dividing the temporal baseline by an expected repeat pass frequency for the satellite (12 days for Sentinel-1). If a reference scene is expected to have 3 pairs, and one is available in-season, only 2 out-of-season pairs will be created. 
+    The ASFSBASStack class creates connected SBAS stacks from Sentinel-1 SLCs and Sentinel-1 SLC bursts. All pairs are created based
+    on the currently set temporal and perpendicular baselines. If a season is defined, out-of-season acquisitions are filtered and
+    seasonal gaps are bridged with 1-year pairs. To determine the number of seasonal bridge pairs to create, a quantity is estimated
+    by dividing the temporal baseline by an expected repeat pass frequency for the satellite (12 days for Sentinel-1). If a
+    reference scene is expected to have 3 pairs, and one is available in-season, only 2 out-of-season pairs will be created. 
 
     Stacks are not guaranteed to be connected. A lack of data acquired at a given time and place can cause gaps.
 
@@ -17,15 +37,6 @@ class ASFSBASStack:
         - `plot()`
         - `get_insar_pairs()`
 
-    TODOs:
-      - support add/remove pairs
-      - optionally connect both beginning and end of each season with 1-year pairs (currently connects ends only)
-      - optional arg for target date from which to create bridge pairs
-      - optional automatic disconnected-stack correction 
-        - If there is an interruption in data at the end of a season, a disconnection can occur
-          - work backwards from the end of the season until a scene is found that can connect to the following year
-        - if the final season in a stack contains no scene within the temporal baseline threshold of the end of the season, it will be disconnected
-          - solution: perform backwards search to connect end of stack to previous year (maintain earlier date as ref scene)
     """
                 
     def __init__(self, **kwargs: dict):
@@ -48,33 +59,39 @@ class ASFSBASStack:
         self.temporal_baseline = kwargs.get('temporalBaseline', 36)
         self.repeat_pass_freq = kwargs.get('repeatPassFrequency', 12)
 
-        # build stack upon initialization if required args were passed
+        # build stack upon initialization if min required args were passed
         if self._ref_scene_id and self._end:
             self._sbas_stack = self.build_sbas_stack()
             self._needs_ref_stack_update = False
 
+    
     @property
     def ref_scene_id(self):
         return self._ref_scene_id
 
+    
     @ref_scene_id.setter
     def ref_scene_id(self, scene_id: str):
         self._ref_scene_id = scene_id
         self._needs_ref_stack_update = True
 
+    
     @property
     def season(self):
         return self._season
 
+    
     @season.setter
     def season(self, season: tuple[str,str]):
         self._season = season
         self._needs_ref_stack_update = True
 
+    
     @property
     def start(self):
         return self._start
 
+    
     @start.setter
     def start(self, stack_start_date: str):
         if (
@@ -88,10 +105,12 @@ class ASFSBASStack:
             self._needs_ref_stack_update = True
         self._start = stack_start_date
 
+    
     @property
     def end(self):
         return self._end
 
+    
     @end.setter
     def end(self, stack_end_date: str):
         if (
@@ -105,6 +124,7 @@ class ASFSBASStack:
             self._needs_ref_stack_update = True
         self._end = stack_end_date
 
+    
     @property
     def sbas_stack(self):
         if self._needs_ref_stack_update:
@@ -117,6 +137,7 @@ class ASFSBASStack:
         )
         return self._sbas_stack
 
+    
     @property
     def plot(self):
         if not self.plot_available:
@@ -124,7 +145,26 @@ class ASFSBASStack:
         return self._plot
             
     
-    def get_ref_stacks(self, stack_gdf: gpd.GeoDataFrame, season_bounds: tuple[int,int]):
+    def get_ref_stacks(self, stack_gdf: gpd.GeoDataFrame, season_bounds: tuple[int,int]) ->  gpd.GeoDataFrame:
+        """
+        Performs stack searches for any reference scenes that haven't had them yet, adding the results to the 'stack' column
+        of self.sbas_stack.
+
+        Merges self.sbas_stack (if it exists) with the input GeoDataFrame, which may contain additional ASFProducts from an
+        expanded ASFSBASStack date range. An asf_search.stack_from_id search is performed on any scene in the resulting 
+        GeoDataFrame whose 'stack' column doesn't contain results from a previous stack search. New results are saved to 
+        the 'stack' column of the GeoDataFrame. 
+        
+        Args:
+            stack_gdf (GeoDataFrame): a GeoDataFrame whose data is comprised of the .baseline and .properties attributes of
+                the ASFProduct objects contained in an ASFSearchResults objects. The GeoDataFrame's geometry is from the 
+                ASFProducts' .geometry attribute.
+            season_bounds (tuple[int,int]): (Jan-2, Apr-1) == (1,91)
+
+        Returns:
+            A GeoDataFrame with the results of an asf.stack_from_id search for each scene it contains in the 'stack' column
+            
+        """
         if self._sbas_stack is not None: 
             # merge updated stack_gdf with existing _sbas_stack so we only need to make API calls on added scenes 
             stack_gdf = self._sbas_stack.merge(stack_gdf, on=['sceneName'], how='right')
@@ -160,7 +200,20 @@ class ASFSBASStack:
         return stack_gdf
 
         
-    def centered_sublist(self, stack, target, length):
+    def centered_sublist(self, stack: list[asf.ASFProduct], target: int, length: int) -> list[asf.ASFProduct]:
+        """
+        Given an asf_search.stack_from_id search results list of ASFProducts and a target temporal baseline, returns a 
+        sublist of a given length whose temporal baselines are centered around the target.
+
+        Arguments:
+            stack  (list[asf_search.ASFProduct]): The results of an asf_search.stack_from_id search
+            target (int): The day of the year to center the sublist around
+            length (int): The length of the sublist
+
+        Returns:
+            A sublist of the given length whose temporal baselines are centered around the target
+
+        """
         temp_baselines = [i.properties['temporalBaseline'] for i in stack]
         if len(temp_baselines) == 0:
             return []
@@ -177,7 +230,20 @@ class ASFSBASStack:
         return [stack[i] for i in range(start_index, end_index)]
     
     
-    def baseline_stack_filter(self, stack, temporal_baseline_range):
+    def baseline_stack_filter(self, stack: list[asf.ASFProduct], temporal_baseline_range: tuple[int, int]):
+        """
+        Takes an input asf_search.stack_from_id search results list and a range of temporal baselines. Returns a sublist
+        of asf_search.ASFProducts whose temporal baselines fall within the given range and whose perpendicular baseline
+        is less than or equal to self.perp_baseline.
+
+        Arguments:
+            stack (list[asf_search.ASFProduct]): asf_search.stack_from_id search results list
+            temporal_baseline_range (tuple[int, int]): Range of temporal baselines by which to filter ASFProducts
+        Returns:
+            A sublist of asf_search.ASFProducts whose temporal baselines fall within the given range and whose 
+            perpendicular baseline is less than or equal to self.perp_baseline
+
+        """
         return [
             i for i in stack 
                 if (
@@ -192,7 +258,25 @@ class ASFSBASStack:
             ]
     
     
-    def get_seasonal_nearest_neighbors(self, stack_gdf, ref_scene_name):
+    def get_seasonal_nearest_neighbors(self, stack_gdf: gpd.GeoDataFrame, ref_scene_name: str) -> list[asf.ASFProduct]:
+        """
+        Used to recalculate the SBAS stack pairs. 
+        
+        Given an sbas_stack GeoDataFrame with a complete 'stack' column and a reference scene ID that it contains
+        (in the 'sceneName' column), returns a list of the secondary inSAR scenes for the given reference scene. 
+        If the expected number of pairs cannot be made within the current season, 1-year pairs (+ or - the 
+        temporal baseline) are attempted. The expected number of pairs for each reference scene is determined by
+        `self.temporal_baseline // self.repeat_pass_freq`
+
+        Arguments:
+            stack_gdf (geopandas.GeoDataFrame): GeoDataFrame with a complete 'stack' column
+            ref_scene_name (str): ID of the reference scene for whose secondary scenes we are searching 
+            
+        Returns:
+            A list of secondary scenes for the provided reference scene that adheres to the currently defined 
+            contraints of the SBAS stack
+        
+        """
         stack = stack_gdf.loc[stack_gdf.sceneName == ref_scene_name]['stack'].iloc[0]
     
         # create stack of in-season scenes, within baseline thresholds
@@ -214,7 +298,17 @@ class ASFSBASStack:
         # return any current season and next season scenes found
         return cur_season_stack + self.centered_sublist(next_season_stack, 365, neighbor_len)
 
-    def get_insar_pairs(self):
+    
+    def get_insar_pairs(self) -> list[asf.ASFProduct]:
+        """
+        Useful when ordering an SBAS stack from ASF HyP3 On-Demand Processing
+        
+        If an ASFSBASStack.sbas_stack GeoDataFrame is available, generate a list tuples containing the reference and secondary
+        scene name for each inSAR pair in the SBAS stack.
+        
+        Returns:
+            A list tuples containing the reference and secondary scene name for each inSAR pair in the SBAS stack
+        """
         
         return [
             (
@@ -225,7 +319,12 @@ class ASFSBASStack:
             for neighbor in row['insarNeighbors']
         ]
 
+    
     def _plot(self):
+        """
+        Plot the SBAS stack
+
+        """
         import plotly.graph_objects as go
         import networkx as nx
         G = nx.Graph()
@@ -322,8 +421,9 @@ class ASFSBASStack:
                             ),
                             title=dict(
                                 text=(
-                                    f'Sentinel-1 Seasonal SBAS Stack from Reference SLC: {self._ref_scene_id}<br>'
-                                    f'Temporal Bounds: {f_date(self._start)} - {f_date(self._end)}<br>Seasonal Bounds {f_date(self._season[0])} - {f_date(self._season[1])}<br>'
+                                    '<b>Sentinel-1 Seasonal SBAS Stack</b><br>'
+                                    f'Reference: {self._ref_scene_id}<br>'
+                                    f'Temporal Bounds: {f_date(self._start)} - {f_date(self._end)}, Seasonal Bounds {f_date(self._season[0])} - {f_date(self._season[1])}<br>'
                                     f'Max Temporal Baseline: {self.temporal_baseline} days, Max Perpendicular Baseline: {self.perp_baseline}m<br>'
                                     f'Stack Size: {len(insar_node_pairs)} pairs from {len(scene_dates)} scenes<br>'
                                 ),
@@ -333,7 +433,7 @@ class ASFSBASStack:
                                 yanchor='top',
                                 font=dict(
                                     family="Helvetica, monospace",
-                                    size=24,
+                                    size=22,
                                 )
                             ),
                             plot_bgcolor='white',
@@ -341,7 +441,13 @@ class ASFSBASStack:
                         ))   
         fig.show()
 
-    def build_sbas_stack(self):
+    def build_sbas_stack(self) -> gpd.GeoDataFrame:
+        """
+        Builds or updates the ASFSBASStack.sbas_stack GeoDataFrame based on currently set stack parameters.
+
+        Returns:
+            The new or updated SBAS stack GeoDataFrame
+        """
         if not self._ref_scene_id:
             raise(Exception('Stack "refSceneName" not set'))
         if not self._start:
@@ -350,17 +456,12 @@ class ASFSBASStack:
             raise(Exception('Stack "end" not set'))
         if pd.to_datetime(self._end) <= pd.to_datetime(self._start):
             raise(Exception(f'Stack end date is earlier than its start date. Correct to proceed.'))
-
-
         
-        if self._season:
-            season_start_ts = pd.Timestamp(datetime.strptime(self._season[0], '%m-%d'), tz='UTC')
-            season_start_day = season_start_ts.timetuple().tm_yday
-            season_end_ts = pd.Timestamp(datetime.strptime(self._season[1], '%m-%d'), tz='UTC')
-            season_end_day = season_end_ts.timetuple().tm_yday
-            season = (season_start_day, season_end_day)
-        else:
-            season = None
+        season_start_ts = pd.Timestamp(datetime.strptime(self._season[0], '%m-%d'), tz='UTC')
+        season_start_day = season_start_ts.timetuple().tm_yday
+        season_end_ts = pd.Timestamp(datetime.strptime(self._season[1], '%m-%d'), tz='UTC')
+        season_end_day = season_end_ts.timetuple().tm_yday
+        season = (season_start_day, season_end_day)
         
         args = asf.ASFSearchOptions(
             **{
