@@ -1,11 +1,14 @@
-from datetime import datetime, timedelta
+from datetime import datetime
+import logging
 
 import asf_search as asf
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 from shapely.geometry import shape
+from tqdm import tqdm
 
+tqdm.pandas()
 
 """
     TODOs:
@@ -190,11 +193,13 @@ class ASFSBASStack:
         )
 
         # update 'stack' with stack search results for ref scenes not previously searched
-        stack_gdf['stack'] = stack_gdf.apply(
-            lambda row: list(asf.stack_from_id(
+        stack_gdf['stack'] = stack_gdf.progress_apply(
+            lambda row: (
+                print(f"Downloading baseline stack for reference scene: {row['sceneName']}...") or 
+                list(asf.stack_from_id(
                 f"{row['sceneName']}-SLC" if 'BURST' not in row['sceneName'] else row['sceneName'], 
                 args
-            )) if (not isinstance(row['stack'], list) and pd.isna(row['stack'])) else row['stack'],
+            ))) if (not isinstance(row['stack'], list) and pd.isna(row['stack'])) else row['stack'],
             axis=1
         )
         return stack_gdf
@@ -471,15 +476,15 @@ class ASFSBASStack:
             }
         )
         
-        # create stack
+        # get baseline stack from stack ref scene
         stack = asf.stack_from_id(self._ref_scene_id, args)
 
+        # put the stack in a GeoDataFrame
         gdf = gpd.GeoDataFrame([s.properties|s.baseline for s in stack], geometry=[shape(s.geometry) for s in stack])
         gdf['insarNeighbors'] = [float('nan') for _ in range(len(gdf))]
         gdf['stack'] = [float('nan') for _ in range(len(gdf))]
-
+        
         gdf = self.get_ref_stacks(gdf, season)
-
         gdf['insarNeighbors'] = gdf.apply(
             lambda row: self.get_seasonal_nearest_neighbors(gdf, row['sceneName']),
             axis=1

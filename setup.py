@@ -12,7 +12,8 @@ requirements = [
     'python-dateutil',
     'tenacity == 8.2.2',
     'pandas',
-    'geopandas'
+    'geopandas',
+    'tqdm'
 ]
 
 test_requirements = [
