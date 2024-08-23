@@ -5,6 +5,7 @@ import asf_search as asf
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import shapely.geometry
 from shapely.geometry import shape
 from tqdm import tqdm
 
@@ -12,9 +13,7 @@ tqdm.pandas()
 
 """
     TODOs:
-      - stack length getter
       - support add/remove pairs
-      - add optional overlap threshold
       - optionally connect both beginning and end of each season with 1-year pairs (currently connects ends only)
       - optional arg for target date from which to create bridge pairs
       - optional automatic disconnected-stack correction 
@@ -61,6 +60,7 @@ class ASFSBASStack:
         self.perp_baseline = kwargs.get('perpendicularBaseline', 400)
         self.temporal_baseline = kwargs.get('temporalBaseline', 36)
         self.repeat_pass_freq = kwargs.get('repeatPassFrequency', 12)
+        self.overlap_threshold = kwargs.get('overlapThreshold', 0.8)
 
         # build stack upon initialization if min required args were passed
         if self._ref_scene_id and self._end:
@@ -135,7 +135,7 @@ class ASFSBASStack:
             self._needs_ref_stack_update = False
         else:
             self._sbas_stack['insarNeighbors'] = self._sbas_stack.apply(
-            lambda row: self.get_seasonal_nearest_neighbors(self._sbas_stack, row['sceneName']),
+            lambda row: self._get_seasonal_nearest_neighbors(self._sbas_stack, row['sceneName']),
             axis=1
         )
         return self._sbas_stack
@@ -146,9 +146,9 @@ class ASFSBASStack:
         if not self.plot_available:
             raise Exception('ASFSBASStack.plot() requires additional dependencies: plotly and/or networkx')
         return self._plot
+        
             
-    
-    def get_ref_stacks(self, stack_gdf: gpd.GeoDataFrame, season_bounds: tuple[int,int]) ->  gpd.GeoDataFrame:
+    def _get_ref_stacks(self, stack_gdf: gpd.GeoDataFrame, season_bounds: tuple[int,int]) ->  gpd.GeoDataFrame:
         """
         Performs stack searches for any reference scenes that haven't had them yet, adding the results to the 'stack' column
         of self.sbas_stack.
@@ -205,7 +205,7 @@ class ASFSBASStack:
         return stack_gdf
 
         
-    def centered_sublist(self, stack: list[asf.ASFProduct], target: int, length: int) -> list[asf.ASFProduct]:
+    def _centered_sublist(self, stack: list[asf.ASFProduct], target: int, length: int) -> list[asf.ASFProduct]:
         """
         Given an asf_search.stack_from_id search results list of ASFProducts and a target temporal baseline, returns a 
         sublist of a given length whose temporal baselines are centered around the target.
@@ -235,11 +235,12 @@ class ASFSBASStack:
         return [stack[i] for i in range(start_index, end_index)]
     
     
-    def baseline_stack_filter(self, stack: list[asf.ASFProduct], temporal_baseline_range: tuple[int, int]):
+    def _baseline_stack_filter(self, ref_scene_geo: shapely.geometry.polygon.Polygon, stack: list[asf.ASFProduct], temporal_baseline_range: tuple[int, int]):
         """
         Takes an input asf_search.stack_from_id search results list and a range of temporal baselines. Returns a sublist
-        of asf_search.ASFProducts whose temporal baselines fall within the given range and whose perpendicular baseline
-        is less than or equal to self.perp_baseline.
+        of asf_search.ASFProducts whose temporal baselines fall within the given range, whose perpendicular baseline
+        is less than or equal to self.perp_baseline, and that would produce an inSAR pair whose geometry _overlaps with the 
+        stack reference scene within the set overlap_threshold.
 
         Arguments:
             stack (list[asf_search.ASFProduct]): asf_search.stack_from_id search results list
@@ -259,11 +260,13 @@ class ASFSBASStack:
                     np.abs(i.properties['perpendicularBaseline']) <= self.perp_baseline
                     and
                     pd.Timestamp(i.properties['stopTime'], tz='UTC') <= pd.Timestamp(self._end, tz='UTC')
+                    and
+                    self._overlaps(ref_scene_geo, shape(i.geometry))
                 )
             ]
     
     
-    def get_seasonal_nearest_neighbors(self, stack_gdf: gpd.GeoDataFrame, ref_scene_name: str) -> list[asf.ASFProduct]:
+    def _get_seasonal_nearest_neighbors(self, stack_gdf: gpd.GeoDataFrame, ref_scene_name: str) -> list[asf.ASFProduct]:
         """
         Used to recalculate the SBAS stack pairs. 
         
@@ -285,7 +288,7 @@ class ASFSBASStack:
         stack = stack_gdf.loc[stack_gdf.sceneName == ref_scene_name]['stack'].iloc[0]
     
         # create stack of in-season scenes, within baseline thresholds
-        cur_season_stack = self.baseline_stack_filter(stack, (0, self.temporal_baseline))
+        cur_season_stack = self._baseline_stack_filter(stack_gdf.loc[stack_gdf.sceneName == ref_scene_name].geometry.iloc[0], stack, (0, self.temporal_baseline))
     
         # find the number of expected neighbors 
         neighbor_len = self.temporal_baseline // self.repeat_pass_freq
@@ -295,13 +298,13 @@ class ASFSBASStack:
             return cur_season_stack
     
         # create stack of next-season scenes
-        next_season_stack = self.baseline_stack_filter(stack, (365-self.temporal_baseline, 365+self.temporal_baseline))
+        next_season_stack = self._baseline_stack_filter(stack_gdf.loc[stack_gdf.sceneName == ref_scene_name].geometry.iloc[0], stack, (365-self.temporal_baseline, 365+self.temporal_baseline))
     
         # find number remaining neighbors to identify
         neighbor_len = neighbor_len - len(cur_season_stack)
     
         # return any current season and next season scenes found
-        return cur_season_stack + self.centered_sublist(next_season_stack, 365, neighbor_len)
+        return cur_season_stack + self._centered_sublist(next_season_stack, 365, neighbor_len)
 
     
     def get_insar_pairs(self) -> list[asf.ASFProduct]:
@@ -324,6 +327,25 @@ class ASFSBASStack:
             for neighbor in row['insarNeighbors']
         ]
 
+    def _overlaps(self, ref_scene_geo, sec_scene_geo):
+        self._sbas_stack
+        intersection_area = ref_scene_geo.intersection(sec_scene_geo).area
+        ref_area = ref_scene_geo.area  
+        overlap = (intersection_area / ref_area) if ref_area != 0 else 0
+        return overlap >= self.overlap_threshold
+
+    def _check_if_secondary(self, row):
+        for i in row['insarNeighbors']:
+            if row['sceneName'] == i['sceneName']:
+                return True
+        return False
+
+    def ref_stack_len(self):
+        counter = 1
+        for _, row in self.sbas_stack.iterrows():
+            if len(row['insarNeighbors']) > 0 or self._check_if_secondary(row):
+                counter += 1
+        return counter
     
     def _plot(self):
         """
@@ -430,7 +452,7 @@ class ASFSBASStack:
                                     f'Reference: {self._ref_scene_id}<br>'
                                     f'Temporal Bounds: {f_date(self._start)} - {f_date(self._end)}, Seasonal Bounds {f_date(self._season[0])} - {f_date(self._season[1])}<br>'
                                     f'Max Temporal Baseline: {self.temporal_baseline} days, Max Perpendicular Baseline: {self.perp_baseline}m<br>'
-                                    f'Stack Size: {len(insar_node_pairs)} pairs from {len(scene_dates)} scenes<br>'
+                                    f'Stack Size: {len(insar_node_pairs)} pairs from {self.ref_stack_len()} scenes<br>'
                                 ),
                                 y=0.95,
                                 x=0.5,
@@ -484,9 +506,9 @@ class ASFSBASStack:
         gdf['insarNeighbors'] = [float('nan') for _ in range(len(gdf))]
         gdf['stack'] = [float('nan') for _ in range(len(gdf))]
         
-        gdf = self.get_ref_stacks(gdf, season)
+        gdf = self._get_ref_stacks(gdf, season)
         gdf['insarNeighbors'] = gdf.apply(
-            lambda row: self.get_seasonal_nearest_neighbors(gdf, row['sceneName']),
+            lambda row: self._get_seasonal_nearest_neighbors(gdf, row['sceneName']),
             axis=1
         )
         return gdf
