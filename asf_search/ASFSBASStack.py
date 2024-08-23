@@ -195,7 +195,7 @@ class ASFSBASStack:
         # update 'stack' with stack search results for ref scenes not previously searched
         stack_gdf['stack'] = stack_gdf.progress_apply(
             lambda row: (
-                print(f"Downloading baseline stack for reference scene: {row['sceneName']}...") or 
+                print(f"Downloading baseline stack information for reference scene: {row['sceneName']}...") or 
                 list(asf.stack_from_id(
                 f"{row['sceneName']}-SLC" if 'BURST' not in row['sceneName'] else row['sceneName'], 
                 args
