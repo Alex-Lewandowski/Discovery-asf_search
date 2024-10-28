@@ -383,7 +383,7 @@ class ASFSBASStack:
         # return cur_season_stack
 
         # return the current season's stack if enough neighbors were found
-        if len(cur_season_stack) >= neighbor_len:
+        if len(cur_season_stack) >= neighbor_len or self._season == ('1-1', '12-31'):
             return cur_season_stack
 
         # create stack of next-season scenes
