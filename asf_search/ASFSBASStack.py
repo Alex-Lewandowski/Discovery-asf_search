@@ -678,7 +678,7 @@ class ASFSBASStack:
 
         # get baseline stack from stack ref scene
         search_scene_id = self._ref_scene_id if 'BURST' in self._ref_scene_id else f'{self._ref_scene_id}-SLC'
-        stack = asf.stack_from_id(search_scene_id-, args)
+        stack = asf.stack_from_id(search_scene_id, args)
 
         # put the stack in a GeoDataFrame
         gdf = gpd.GeoDataFrame(
