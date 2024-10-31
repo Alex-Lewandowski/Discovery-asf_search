@@ -292,7 +292,7 @@ class ASFSBASStack:
 
     def _baseline_stack_filter(
         self,
-        ref_scene_gdf: str,
+        ref_scene_gdf: gpd.geodataframe.GeoDataFrame,
         stack: list[asf.ASFProduct],
         temporal_baseline_range: tuple[int, int],
     ):
@@ -346,7 +346,7 @@ class ASFSBASStack:
                         pd.Timestamp(i.properties["stopTime"], tz="UTC") - ref_scene_dt
                     ).days
                     <= temporal_baseline_range[1]                    
-                    and np.abs(i.properties["perpendicularBaseline"]) + np.abs(ref_scene_gdf.iloc[0]["perpendicularBaseline"])
+                    and self._calc_shortcut_perp_baseline(ref_scene_gdf.iloc[0]['perpendicularBaseline'], i.properties["perpendicularBaseline"])
                     <= self.perp_baseline
                     and pd.Timestamp(i.properties["stopTime"], tz="UTC")
                     <= pd.Timestamp(self._end, tz="UTC")
@@ -405,13 +405,14 @@ class ASFSBASStack:
         bridge_target_date = pd.to_datetime(f"{ref_scene_date.year}-{self.bridge_target_date}", utc=True)
         bridge_range_start = bridge_target_date - pd.Timedelta(days=self.temporal_baseline)
         bridge_range_end = bridge_target_date + pd.Timedelta(days=self.temporal_baseline)
-        print(bridge_range_start)
-        print(ref_scene_date)
-        print(bridge_range_end)
-        print('\n\n\n')
+        # print(bridge_range_start)
+        # print(ref_scene_date)
+        # print(bridge_range_end)
+        # print('\n\n\n')
         if (self._season == ('1-1', '12-31')
             or ref_scene_date < bridge_range_start
             or ref_scene_date > bridge_range_end):
+            
             return cur_season_stack
 
         # create stack of next-season scenes
