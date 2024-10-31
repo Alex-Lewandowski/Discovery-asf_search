@@ -73,11 +73,11 @@ class ASFSBASStack:
             self._needs_sbas_stack_update = False
 
     @property
-    def ref_scene_id(self):
+    def geo_ref_scene_id(self):
         return self._geo_ref_scene_id
 
-    @ref_scene_id.setter
-    def ref_scene_id(self, scene_id: str):
+    @geo_ref_scene_id.setter
+    def geo_ref_scene_id(self, scene_id: str):
         self._geo_ref_scene_id = scene_id
         self._sbas_stack = None
         self._needs_sbas_stack_update = True
@@ -155,9 +155,13 @@ class ASFSBASStack:
         season_end = datetime.strptime(self.season[1], "%m-%d").timetuple().tm_yday
         
         if season_start < season_end:
-            midseason = (season_end - season_start) // 2
+            midseason = ((season_end - season_start) // 2) + season_start
         elif season_end < season_start:
-            midseason = 365 - season_start + season_end
+            half_length = (365 - season_start + season_end) // 2
+            if half_length <= 365 - season_start:
+                midseason = season_start + half_length
+            else:
+                midseason = half_length - (365 - season_start)
         else:
             raise Exception("Cannot calculate a midseason date for a season of 0 length")
 
@@ -395,10 +399,19 @@ class ASFSBASStack:
         # find the number of expected neighbors
         neighbor_len = self.temporal_baseline // self.repeat_pass_freq
 
-        # return cur_season_stack
-
         # return the current season's stack if enough neighbors were found
-        if len(cur_season_stack) >= neighbor_len or self._season == ('1-1', '12-31'):
+        ref_scene_date = stack_gdf.loc[stack_gdf.sceneName == ref_scene_name]['stopTime'].iloc[0]
+        ref_scene_date = pd.to_datetime(ref_scene_date, utc=True)
+        bridge_target_date = pd.to_datetime(f"{ref_scene_date.year}-{self.bridge_target_date}", utc=True)
+        bridge_range_start = bridge_target_date - pd.Timedelta(days=self.temporal_baseline)
+        bridge_range_end = bridge_target_date + pd.Timedelta(days=self.temporal_baseline)
+        print(bridge_range_start)
+        print(ref_scene_date)
+        print(bridge_range_end)
+        print('\n\n\n')
+        if (self._season == ('1-1', '12-31')
+            or ref_scene_date < bridge_range_start
+            or ref_scene_date > bridge_range_end):
             return cur_season_stack
 
         # create stack of next-season scenes
@@ -408,8 +421,8 @@ class ASFSBASStack:
             (365 - self.temporal_baseline, 365 + self.temporal_baseline),
         )
 
-        # find number remaining neighbors to identify
-        neighbor_len = neighbor_len - len(cur_season_stack)
+        # # find number remaining neighbors to identify
+        # neighbor_len = neighbor_len - len(cur_season_stack)
 
         # return any current season and next season scenes found
         return cur_season_stack + self._centered_sublist(
