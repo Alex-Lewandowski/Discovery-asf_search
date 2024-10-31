@@ -342,11 +342,9 @@ class ASFSBASStack:
                 for i in stack
                 if (
                     temporal_baseline_range[0]
-                    <= (
-                        pd.Timestamp(i.properties["stopTime"], tz="UTC") - ref_scene_dt
-                    ).days
+                    < (pd.Timestamp(i.properties["stopTime"], tz="UTC") - ref_scene_dt).days
                     <= temporal_baseline_range[1]                    
-                    and self._calc_shortcut_perp_baseline(ref_scene_gdf.iloc[0]['perpendicularBaseline'], i.properties["perpendicularBaseline"])
+                    and np.abs(self._calc_shortcut_perp_baseline(ref_scene_gdf.iloc[0]['perpendicularBaseline'], i.properties["perpendicularBaseline"]))
                     <= self.perp_baseline
                     and pd.Timestamp(i.properties["stopTime"], tz="UTC")
                     <= pd.Timestamp(self._end, tz="UTC")
