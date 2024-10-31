@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import asf_search as asf
 import geopandas as gpd
@@ -53,31 +53,32 @@ class ASFSBASStack:
                 "Warning: ASFSBASStack.plot() requires additional dependencies: plotly and/or networkx"
             )
 
-        self._ref_scene_id = kwargs.get("refSceneName", None)
+        self._geo_ref_scene_id = kwargs.get("refSceneName", None)
         self._season = kwargs.get("season", ("1-1", "12-31"))
         self._start = kwargs.get("start", None)
         self._end = kwargs.get("end", None)
         self._needs_sbas_stack_update = True
         self._sbas_stack = None
-        self._perp_baseline_shortcut = kwargs.get("perpBaselineShortcut", True)
 
+        self.bridge_target_date = kwargs.get("bridgeTargetDate", self._calc_midseason_date())
+        self._perp_baseline_shortcut = kwargs.get("perpBaselineShortcut", True)
         self.perp_baseline = kwargs.get("perpendicularBaseline", 400)
         self.temporal_baseline = kwargs.get("temporalBaseline", 36)
         self.repeat_pass_freq = kwargs.get("repeatPassFrequency", 12)
         self.overlap_threshold = kwargs.get("overlapThreshold", 0.8)
 
         # build stack upon initialization if min required args were passed
-        if self._ref_scene_id and self._end:
+        if self._geo_ref_scene_id and self._end:
             self._sbas_stack = self.build_sbas_stack()
             self._needs_sbas_stack_update = False
 
     @property
     def ref_scene_id(self):
-        return self._ref_scene_id
+        return self._geo_ref_scene_id
 
     @ref_scene_id.setter
     def ref_scene_id(self, scene_id: str):
-        self._ref_scene_id = scene_id
+        self._geo_ref_scene_id = scene_id
         self._sbas_stack = None
         self._needs_sbas_stack_update = True
 
@@ -149,6 +150,20 @@ class ASFSBASStack:
             )
         return self._plot
 
+    def _calc_midseason_date(self):
+        season_start = datetime.strptime(self.season[0], "%m-%d").timetuple().tm_yday
+        season_end = datetime.strptime(self.season[1], "%m-%d").timetuple().tm_yday
+        
+        if season_start < season_end:
+            midseason = (season_end - season_start) // 2
+        elif season_end < season_start:
+            midseason = 365 - season_start + season_end
+        else:
+            raise Exception("Cannot calculate a midseason date for a season of 0 length")
+
+        return (datetime(2000, 1, 1) + timedelta(days=midseason - 1)).strftime("%m-%d")
+        
+
     def _merge_stacks(self, stack_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         """
         Merges the passed in SBAS stack GeoDataFrame with self.sbas_stack. Any previously existing reference
@@ -157,7 +172,7 @@ class ASFSBASStack:
         preventing duplicated stack searches.
 
         Arguments:
-            stack_gdf (gpd.GeoDataFrame): A new GeoDataFrame with only self._ref_scene_id's stack search results and
+            stack_gdf (gpd.GeoDataFrame): A new GeoDataFrame with only self._geo_ref_scene_id's stack search results and
             an empty 'insarNeighbors' column
 
         Returns: A merged GeoDataFrame
@@ -362,7 +377,7 @@ class ASFSBASStack:
 
         """
         if self._perp_baseline_shortcut:
-            stack = stack_gdf.loc[stack_gdf.sceneName == self._ref_scene_id][
+            stack = stack_gdf.loc[stack_gdf.sceneName == self._geo_ref_scene_id][
                 "stack"
             ].iloc[0]
         else:
@@ -622,7 +637,7 @@ class ASFSBASStack:
                 title=dict(
                     text=(
                         "<b>Sentinel-1 Seasonal SBAS Stack</b><br>"
-                        f"Reference: {self._ref_scene_id}<br>"
+                        f"Reference: {self._geo_ref_scene_id}<br>"
                         f"Temporal Bounds: {f_date(self._start)} - {f_date(self._end)}, Seasonal Bounds: {f_date(self._season[0])} - {f_date(self._season[1])}<br>"
                         f"Max Temporal Baseline: {self.temporal_baseline} days, Max Perpendicular Baseline: {self.perp_baseline}m{shortcut}<br>"
                         f"Stack Size: {len(insar_node_pairs)} pairs from {self.ref_stack_len()} scenes<br>"
@@ -649,7 +664,7 @@ class ASFSBASStack:
         Returns:
             The new or updated SBAS stack GeoDataFrame
         """
-        if not self._ref_scene_id:
+        if not self._geo_ref_scene_id:
             raise (Exception('Stack "refSceneName" not set'))
         if not self._start:
             raise (Exception('Stack "start" not set'))
@@ -677,7 +692,7 @@ class ASFSBASStack:
         )
 
         # get baseline stack from stack ref scene
-        search_scene_id = self._ref_scene_id if 'BURST' in self._ref_scene_id else f'{self._ref_scene_id}-SLC'
+        search_scene_id = self._geo_ref_scene_id if 'BURST' in self._geo_ref_scene_id else f'{self._geo_ref_scene_id}-SLC'
         stack = asf.stack_from_id(search_scene_id, args)
 
         # put the stack in a GeoDataFrame
@@ -692,7 +707,7 @@ class ASFSBASStack:
 
         # Add ref scene's stack to its row's 'stack' column
         gdf["stack"] = gdf["stack"].astype(object)
-        ref_index = gdf.index[gdf["sceneName"] == self._ref_scene_id]
+        ref_index = gdf.index[gdf["sceneName"] == self._geo_ref_scene_id]
         gdf.at[ref_index[0], "stack"] = stack
 
         # merge gdf with self.sbas_stack, if one exists
