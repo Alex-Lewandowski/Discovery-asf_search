@@ -123,6 +123,7 @@ class ASFSBASStack:
     def sbas_stack(self):
         if self._needs_sbas_stack_update:
             self._sbas_stack = self.build_sbas_stack()
+            self._full_stack = self._build_full_stack()
             self._needs_sbas_stack_update = False
         else:
             self._sbas_stack["insarNeighbors"] = self._sbas_stack.apply(
@@ -150,6 +151,22 @@ class ASFSBASStack:
             )
         return self._plot
 
+    def _build_full_stack(self):
+        args = asf.ASFSearchOptions(
+            **{"start": self._start, "end": self._end}
+        )
+    
+        # get baseline stack from stack ref scene
+        search_scene_id = self._geo_ref_scene_id if 'BURST' in self._geo_ref_scene_id else f'{self._geo_ref_scene_id}-SLC'
+        stack = asf.stack_from_id(search_scene_id, args)
+
+        # put the stack in a GeoDataFrame
+        return gpd.GeoDataFrame(
+            [s.properties | s.baseline for s in stack],
+            geometry=[shape(s.geometry) for s in stack],
+        )
+
+    
     def _calc_midseason_date(self):
         season_start = datetime.strptime(self.season[0], "%m-%d").timetuple().tm_yday
         season_end = datetime.strptime(self.season[1], "%m-%d").timetuple().tm_yday
@@ -403,10 +420,7 @@ class ASFSBASStack:
         bridge_target_date = pd.to_datetime(f"{ref_scene_date.year}-{self.bridge_target_date}", utc=True)
         bridge_range_start = bridge_target_date - pd.Timedelta(days=self.temporal_baseline)
         bridge_range_end = bridge_target_date + pd.Timedelta(days=self.temporal_baseline)
-        # print(bridge_range_start)
-        # print(ref_scene_date)
-        # print(bridge_range_end)
-        # print('\n\n\n')
+ 
         if (self._season == ('1-1', '12-31')
             or ref_scene_date < bridge_range_start
             or ref_scene_date > bridge_range_end):
@@ -474,11 +488,14 @@ class ASFSBASStack:
             True if the scene is found in the 'insarNeighbors' column of self.sbas_stack, else False
         
         """
-        for _, row in self.sbas_stack.iterrows():
-            for i in row["insarNeighbors"]:
-                if i.properties["sceneName"] == scene_name:
-                    return True
-        return False
+        # for _, row in self.sbas_stack.iterrows():
+        #     for i in row["insarNeighbors"]:
+        #         if i.properties["sceneName"] == scene_name:
+        #             return True
+        # return False
+        secondary_scenes = [i.properties['sceneName'] for j in self.sbas_stack['insarNeighbors'] for i in j]
+        return  scene_name in secondary_scenes
+        
 
     def ref_stack_len(self):
         counter = 0
@@ -507,6 +524,10 @@ class ASFSBASStack:
         """
         import plotly.graph_objects as go
         import networkx as nx
+
+        import time # TODO remove
+
+        section1_start = time.time()
 
         G = nx.DiGraph()
 
@@ -578,17 +599,6 @@ class ASFSBASStack:
                 f"{edge[0]} - {edge[1]}, perp baseline: {edge[2]['perp_bs']}, temp baseline: {edge[2]['temp_bs']}"
             )
 
-        start_date = min(scene_dates.values())
-        end_date = max(scene_dates.values())
-        date_range = (
-            pd.date_range(start=start_date, end=end_date, freq="MS")
-            .strftime("%Y-%m")
-            .tolist()
-        )
-        date_range_ts = [
-            datetime.strptime(date, "%Y-%m").timestamp() for date in date_range
-        ]
-
         edge_trace = go.Scatter(
             x=edge_x,
             y=edge_y,
@@ -621,6 +631,45 @@ class ASFSBASStack:
             hovertext=node_text,
         )
 
+        # create a gdf containing all unused SLCs in the full time range of the time series
+        empty_neighbors = self.sbas_stack[self.sbas_stack['insarNeighbors'].apply(lambda x: len(x) > 0)]
+        gdf = self._full_stack[~self._full_stack['sceneName'].isin(empty_neighbors['sceneName'])]
+
+        secondary_scenes = [i.properties['sceneName'] for j in self.sbas_stack['insarNeighbors'] for i in j]      
+        gdf = gdf[gdf['sceneName'].apply(lambda x: x not in secondary_scenes)]
+        
+        all_slcs = [i.split("T")[0] for i in gdf["stopTime"]]
+        all_slcs_x = [datetime.strptime(i.split("T")[0], "%Y-%m-%d").timestamp() for i in gdf["stopTime"]]  # datetime.strptime(data["date"], "%Y-%m-%d").timestamp()
+        all_slcs_y = [i for i in gdf["perpendicularBaseline"]]
+
+
+        all_slcs_trace = go.Scatter(
+            x=all_slcs_x, y=all_slcs_y,
+            mode='markers',
+            hoverinfo='text',
+            text=all_slcs,
+            marker=dict(
+                color='rgba(255,0,0,0.5)',  # Different color for unconnected nodes
+                size=10,
+                line_width=2
+            )
+        )
+
+        date_range = (
+            pd.date_range(
+                start='-'.join(self.start.split('-')[:2]), 
+                end='-'.join(self.end.split('-')[:2]), 
+                freq="MS"
+            )
+            .strftime("%Y-%m")
+            .tolist()
+        )
+
+        
+        date_range_ts = [
+            datetime.strptime(date, "%Y-%m").timestamp() for date in date_range
+        ]
+        
         def f_date(dash_date_str):
             return dash_date_str.replace("-", "/")
 
@@ -628,7 +677,7 @@ class ASFSBASStack:
         if self.perp_baseline_shortcut:
             shortcut = ", Perpendicular baseline shortcut: ON (calculated from stack reference scene)"
         fig = go.Figure(
-            data=[edge_trace, edge_hover_trace, node_trace],
+            data=[edge_trace, edge_hover_trace, node_trace, all_slcs_trace],
             layout=go.Layout(
                 showlegend=False,
                 hovermode="closest",
