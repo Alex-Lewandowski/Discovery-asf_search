@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import re
 
 import asf_search as asf
 import geopandas as gpd
@@ -54,6 +55,8 @@ class ASFSBASStack:
             )
 
         self._geo_ref_scene_id = kwargs.get("refSceneName", None)
+        self._burst_ids = kwargs.get("burstIDs", None)
+        self._burst_swaths = kwargs.get("burstSwaths", None)
         self._season = kwargs.get("season", ("1-1", "12-31"))
         self._start = kwargs.get("start", None)
         self._end = kwargs.get("end", None)
@@ -61,7 +64,6 @@ class ASFSBASStack:
         self._sbas_stack = None
 
         self.bridge_target_date = kwargs.get("bridgeTargetDate", self._calc_midseason_date())
-        self._perp_baseline_shortcut = kwargs.get("perpBaselineShortcut", True)
         self.perp_baseline = kwargs.get("perpendicularBaseline", 400)
         self.temporal_baseline = kwargs.get("temporalBaseline", 36)
         self.repeat_pass_freq = kwargs.get("repeatPassFrequency", 12)
@@ -70,7 +72,30 @@ class ASFSBASStack:
         # build stack upon initialization if min required args were passed
         if self._geo_ref_scene_id and self._end:
             self._sbas_stack = self.build_sbas_stack()
-            self._needs_sbas_stack_update = False
+            # self._needs_sbas_stack_update = False
+
+        if not self._geo_ref_scene_id and self._burst_ids and self._burst_swaths:
+            opts = {
+                'platform': asf.PLATFORM.SENTINEL1,
+                'fullBurstID': f"{self._burst_ids[0]}_{self._burst_swaths[0]}",
+                'start': pd.to_datetime(self._start, utc=True),
+                'end': pd.to_datetime(self._end, utc=True),
+                'polarization': 'VV'
+            }
+            results = asf.geo_search(intersectsWith=None, **opts)   
+            self._geo_ref_scene_id = sorted([r.properties["sceneName"] for r in results])[0]
+            self._multi_burst_stacks = list()
+            if self._end:
+                self._sbas_stack = self.build_sbas_stack()
+                # self._needs_sbas_stack_update = False
+
+    @property
+    def needs_sbas_stack_update(self):
+        return self._needs_sbas_stack_update
+
+    @property
+    def full_stack(self):
+        return self._full_stack
 
     @property
     def geo_ref_scene_id(self):
@@ -81,6 +106,18 @@ class ASFSBASStack:
         self._geo_ref_scene_id = scene_id
         self._sbas_stack = None
         self._needs_sbas_stack_update = True
+
+    @property
+    def multi_burst_stacks(self):
+        return self._multi_burst_stacks
+
+    @property
+    def burst_ids(self):
+        return self._burst_ids
+
+    @property
+    def burst_swaths(self):
+        return self._burst_swaths
 
     @property
     def season(self):
@@ -133,15 +170,6 @@ class ASFSBASStack:
                 axis=1,
             )
         return self._sbas_stack
-
-    @property
-    def perp_baseline_shortcut(self):
-        return self._perp_baseline_shortcut
-
-    @perp_baseline_shortcut.setter
-    def perp_baseline_shortcut(self, value: bool):
-        self._perp_baseline_shortcut = value
-        self._needs_sbas_stack_update = True
 
     @property
     def plot(self):
@@ -226,56 +254,7 @@ class ASFSBASStack:
 
         return stack_gdf
 
-    def _get_ref_stacks(
-        self, stack_gdf: gpd.GeoDataFrame, season_bounds: tuple[int, int]
-    ) -> gpd.GeoDataFrame:
-        """
-        Performs stack searches for any reference scenes that haven't had them yet, adding the results to the 'stack' column
-        of self.sbas_stack
-
-        Args:
-            stack_gdf (GeoDataFrame): an SBAS stack GeoDataFrame 
-            season_bounds (tuple[int,int]): (Jan-2, Apr-1) == (1,91)
-
-        Returns:
-            A GeoDataFrame with the results of an asf.stack_from_id search for each scene it contains in the 'stack' column
-
-        """
-
-        args = asf.ASFSearchOptions(
-            **{
-                "start": self._start,
-                "end": pd.Timestamp.now().strftime("%Y-%m-%d"),
-                "season": season_bounds,
-            }
-        )
-
-        # update 'stack' with stack search results for ref scenes not previously searched
-        stack_gdf["stack"] = stack_gdf.progress_apply(
-            lambda row: (
-                (
-                    print(
-                        f"Downloading baseline stack information for reference scene: {row['sceneName']}..."
-                    )
-                    or list(
-                        asf.stack_from_id(
-                            (
-                                f"{row['sceneName']}-SLC"
-                                if "BURST" not in row["sceneName"]
-                                else row["sceneName"]
-                            ),
-                            args,
-                        )
-                    )
-                )
-                if (not isinstance(row["stack"], list) and pd.isna(row["stack"]))
-                else row["stack"]
-            ),
-            axis=1,
-        )
-
-        return stack_gdf
-
+    
     def _centered_sublist(
         self, stack: list[asf.ASFProduct], target: int, length: int
     ) -> list[asf.ASFProduct]:
@@ -319,11 +298,6 @@ class ASFSBASStack:
         is less than or equal to self.perp_baseline, and that would produce an inSAR pair whose geometry _overlaps with the
         stack reference scene within the set overlap_threshold.
 
-        If self._perp_baseline_shortcut is True, perpendicular baseline thresholds are applied between every reference
-        or secondary scene and the reference scene for the entire sbas stack (self.perp_baseline). A pair will not be
-        included if either of its scenes surpass the threshold. If false, perpendicular baseline thresholds are applied
-        between each reference and secondary scene.
-
         Arguments:
             stack (list[asf_search.ASFProduct]): asf_search.stack_from_id search results list
             temporal_baseline_range (tuple[int, int]): Range of temporal baselines by which to filter ASFProducts
@@ -335,41 +309,24 @@ class ASFSBASStack:
         ref_scene_geo = ref_scene_gdf.geometry.iloc[0]
         ref_scene_name = ref_scene_gdf.iloc[0]["sceneName"]
 
-        if not self._perp_baseline_shortcut:
-            return [
-                i
-                for i in stack
-                if (
-                    temporal_baseline_range[0]
-                    < i.properties["temporalBaseline"]
-                    <= temporal_baseline_range[1]
-                    and i.properties["perpendicularBaseline"]
-                    and np.abs(i.properties["perpendicularBaseline"])
-                    <= self.perp_baseline
-                    and pd.Timestamp(i.properties["stopTime"], tz="UTC")
-                    <= pd.Timestamp(self._end, tz="UTC")
-                    and self._overlaps(ref_scene_geo, shape(i.geometry))
-                    and i.properties["sceneName"] != ref_scene_name
-                )
-            ]
-        else:
-            ref_scene_dt = pd.Timestamp(ref_scene_gdf["stopTime"].iloc[0], tz="UTC")
-            return [
-                i
-                for i in stack
-                if (
-                    temporal_baseline_range[0]
-                    < (pd.Timestamp(i.properties["stopTime"], tz="UTC") - ref_scene_dt).days
-                    <= temporal_baseline_range[1]                    
-                    and np.abs(self._calc_shortcut_perp_baseline(ref_scene_gdf.iloc[0]['perpendicularBaseline'], i.properties["perpendicularBaseline"]))
-                    <= self.perp_baseline
-                    and pd.Timestamp(i.properties["stopTime"], tz="UTC")
-                    <= pd.Timestamp(self._end, tz="UTC")
-                    and pd.Timestamp(i.properties["stopTime"], tz="UTC") >= ref_scene_dt
-                    and self._overlaps(ref_scene_geo, shape(i.geometry))
-                    and i.properties["sceneName"] != ref_scene_name
-                )
-            ]
+
+        ref_scene_dt = pd.Timestamp(ref_scene_gdf["stopTime"].iloc[0], tz="UTC")
+        return [
+            i
+            for i in stack
+            if (
+                temporal_baseline_range[0]
+                < (pd.Timestamp(i.properties["stopTime"], tz="UTC") - ref_scene_dt).days
+                <= temporal_baseline_range[1]                    
+                and np.abs(self._calc_perp_baseline(ref_scene_gdf.iloc[0]['perpendicularBaseline'], i.properties["perpendicularBaseline"]))
+                <= self.perp_baseline
+                and pd.Timestamp(i.properties["stopTime"], tz="UTC")
+                <= pd.Timestamp(self._end, tz="UTC")
+                and pd.Timestamp(i.properties["stopTime"], tz="UTC") >= ref_scene_dt
+                and self._overlaps(ref_scene_geo, shape(i.geometry))
+                and i.properties["sceneName"] != ref_scene_name
+            )
+        ]
             
 
     def _get_seasonal_nearest_neighbors(
@@ -395,14 +352,10 @@ class ASFSBASStack:
             contraints of the SBAS stack
 
         """
-        if self._perp_baseline_shortcut:
-            stack = stack_gdf.loc[stack_gdf.sceneName == self._geo_ref_scene_id][
-                "stack"
-            ].iloc[0]
-        else:
-            stack = stack_gdf.loc[stack_gdf.sceneName == ref_scene_name]["stack"].iloc[
-                0
-            ]
+
+        stack = stack_gdf.loc[stack_gdf.sceneName == self._geo_ref_scene_id][
+            "stack"
+        ].iloc[0]
 
         # create stack of in-season scenes, within baseline thresholds
         cur_season_stack = self._baseline_stack_filter(
@@ -459,6 +412,49 @@ class ASFSBASStack:
             for neighbor in row["insarNeighbors"]
         ]
 
+    def get_multiburst_pairs(self):
+        self.get_multi_bursts()
+        pairs = [self.get_insar_pairs()]
+        for stack in self.multi_burst_stacks:
+            pairs.append(stack.get_insar_pairs())
+
+        return [
+            [tuple(items) for items in zip(*rows)]
+            for rows in zip(*pairs)
+        ]
+            
+
+    def get_multi_bursts(self):
+        ts_regex = r"(?<=IW1_|IW2_|IW3_)\d{8}T\d{6}"
+        start = re.search(ts_regex, self._geo_ref_scene_id).group(0)
+        start = pd.Timestamp(start, tz="UTC")
+        end = start + pd.Timedelta(hours=1)
+        self._multi_burst_stacks = list()
+        for id in self._burst_ids:
+            opts = {
+                'platform': asf.PLATFORM.SENTINEL1,
+                'relativeBurstID': id.split("_")[1],
+                'start': start,
+                'end': end,
+                'polarization': 'VV'
+            }
+            results = asf.geo_search(intersectsWith=None, **opts)
+            scene_ids = [r.properties["sceneName"] for r in results]
+            scene_ids = [i for i in scene_ids if i != self._geo_ref_scene_id and i.split("_")[2] in self._burst_swaths]
+            for id in scene_ids:
+                args = {
+                    'refSceneName': id,
+                    'season': self._season, 
+                    'start': self._start, 
+                    'end': self._end, 
+                    'perpendicularBaseline': self.perp_baseline,
+                    'temporalBaseline': self.temporal_baseline,
+                    'repeatPassFrequency': self.repeat_pass_freq,
+                    'overlapThreshold': self.overlap_threshold,
+                    'perpBaselineShortcut': True
+                }
+                self._multi_burst_stacks.append(asf.ASFSBASStack(**args))
+
     def _overlaps(self, ref_scene_geo: Polygon, sec_scene_geo: Polygon) -> bool:
         """
         Determines if two scenes overlap enough to satisfy the currently
@@ -507,7 +503,7 @@ class ASFSBASStack:
         return counter
 
     
-    def _calc_shortcut_perp_baseline(self, ref_perp_baseline, sec_perp_baseline):
+    def _calc_perp_baseline(self, ref_perp_baseline, sec_perp_baseline):
         if ref_perp_baseline * sec_perp_baseline >= 0:
             return sec_perp_baseline - ref_perp_baseline
         elif ref_perp_baseline <= sec_perp_baseline:
@@ -531,35 +527,21 @@ class ASFSBASStack:
 
         G = nx.DiGraph()
 
-        if self._perp_baseline_shortcut:
-            insar_node_pairs = [
-                (
-                    row["stopTime"].split("T")[0],
-                    neighbor.properties["stopTime"].split("T")[0],
-                    {
-                        "perp_bs": self._calc_shortcut_perp_baseline(row["perpendicularBaseline"], neighbor.properties["perpendicularBaseline"]),
-                        "temp_bs": (
-                            pd.Timestamp(neighbor.properties["stopTime"], tz="UTC")
-                            - pd.Timestamp(row["stopTime"], tz="UTC")
-                        ).days,
-                    },
-                )
-                for _, row in self.sbas_stack.iterrows()
-                for neighbor in row["insarNeighbors"]
-            ]
-        else:
-            insar_node_pairs = [
-                (
-                    row["stopTime"].split("T")[0],
-                    neighbor.properties["stopTime"].split("T")[0],
-                    {
-                        "perp_bs": neighbor.properties["perpendicularBaseline"],
-                        "temp_bs": neighbor.properties["temporalBaseline"],
-                    },
-                )
-                for _, row in self.sbas_stack.iterrows()
-                for neighbor in row["insarNeighbors"]
-            ]
+        insar_node_pairs = [
+            (
+                row["stopTime"].split("T")[0],
+                neighbor.properties["stopTime"].split("T")[0],
+                {
+                    "perp_bs": self._calc_perp_baseline(row["perpendicularBaseline"], neighbor.properties["perpendicularBaseline"]),
+                    "temp_bs": (
+                        pd.Timestamp(neighbor.properties["stopTime"], tz="UTC")
+                        - pd.Timestamp(row["stopTime"], tz="UTC")
+                    ).days,
+                },
+            )
+            for _, row in self.sbas_stack.iterrows()
+            for neighbor in row["insarNeighbors"]
+        ]
 
         G.add_edges_from(insar_node_pairs, data=True)
 
@@ -673,9 +655,6 @@ class ASFSBASStack:
         def f_date(dash_date_str):
             return dash_date_str.replace("-", "/")
 
-        shortcut = ""
-        if self.perp_baseline_shortcut:
-            shortcut = ", Perpendicular baseline shortcut: ON (calculated from stack reference scene)"
         fig = go.Figure(
             data=[edge_trace, edge_hover_trace, node_trace, all_slcs_trace],
             layout=go.Layout(
@@ -700,7 +679,7 @@ class ASFSBASStack:
                         "<b>Sentinel-1 Seasonal SBAS Stack</b><br>"
                         f"Reference: {self._geo_ref_scene_id}<br>"
                         f"Temporal Bounds: {f_date(self._start)} - {f_date(self._end)}, Seasonal Bounds: {f_date(self._season[0])} - {f_date(self._season[1])}<br>"
-                        f"Max Temporal Baseline: {self.temporal_baseline} days, Max Perpendicular Baseline: {self.perp_baseline}m{shortcut}<br>"
+                        f"Max Temporal Baseline: {self.temporal_baseline} days, Max Perpendicular Baseline: {self.perp_baseline}m<br>"
                         f"Stack Size: {len(insar_node_pairs)} pairs from {self.ref_stack_len()} scenes<br>"
                     ),
                     y=0.95,
@@ -773,12 +752,6 @@ class ASFSBASStack:
 
         # merge gdf with self.sbas_stack, if one exists
         gdf = self._merge_stacks(gdf)
-
-        # perform stack searches for every reference scene if not taking the 
-        # perpendicular baseline shortcut of only checking baselines against
-        # the stack reference scene 
-        if not self._perp_baseline_shortcut:
-            gdf = self._get_ref_stacks(gdf, season)
 
         # Find neighbors for every potential InSAR reference scene in the stack
         gdf["insarNeighbors"] = gdf.apply(
