@@ -1,3 +1,7 @@
+I made this fork to develop some code to perform multi-annual seasonal SBAS stacking, with the goal of creating fully-connected multi-annual seasonal stacks. I reworked the code drastically, adding new supportive asf_search classes and removing some heavy dependencies. I am archiving this fork. The updated stacking code can be found in the asf_search repo here: https://github.com/asfadmin/Discovery-asf_search/tree/feature/stacking
+
+
+
 # asf_search
 
 [![PyPI version](https://img.shields.io/pypi/v/asf_search.svg)](https://pypi.python.org/pypi/asf_search/)
